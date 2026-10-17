@@ -1,0 +1,17 @@
+name: build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet build RepoRestApi.sln -c Release
+      - run: dotnet test tests/RepoRestApi.Tests -c Release --no-build
+      - run: bash scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RepoRestApi-1.0.0
+          path: artifacts/RepoRestApi-1.0.0.zip*

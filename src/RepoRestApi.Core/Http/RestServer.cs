@@ -1,0 +1,91 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using RepoRestApi.Core.Models;
+namespace RepoRestApi.Core.Http;
+public sealed class RestServer : IDisposable
+{
+    private readonly HttpListener listener = new HttpListener();
+    private readonly ApiRouter router;
+    private readonly ApiOptions options;
+    private readonly Action<string> log;
+    private readonly CancellationTokenSource stop = new CancellationTokenSource();
+    private readonly object gate = new object();
+    private readonly HashSet<Task> requests = new HashSet<Task>();
+    private readonly SemaphoreSlim slots;
+    private Task? acceptLoop;
+    public RestServer(ApiOptions options, ApiRouter router, Action<string> log) { options.Validate(); this.options = options; this.router = router; this.log = log; slots = new SemaphoreSlim(options.QueueCapacity); }
+    public void Start()
+    {
+        string host = options.Host.Contains(":") ? "[" + options.Host + "]" : options.Host;
+        listener.Prefixes.Add("http://" + host + ":" + options.Port + "/");
+        listener.Start(); acceptLoop = Accept(); log("REST server listening on " + options.Host + ":" + options.Port);
+    }
+    private async Task Accept()
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            HttpListenerContext context;
+            try { context = await listener.GetContextAsync().ConfigureAwait(false); }
+            catch (Exception e) when (e is HttpListenerException || e is ObjectDisposedException) { if (!stop.IsCancellationRequested) log("HTTP accept stopped: " + e.GetType().Name); return; }
+            if (!slots.Wait(0)) { try { await Write(context, ApiResponse.Error(new ApiException(503, "SERVER_BUSY", "HTTP request capacity exceeded."))).ConfigureAwait(false); } catch { context.Response.Abort(); } continue; }
+            Task task = Serve(context);
+            lock (gate) requests.Add(task);
+            _ = task.ContinueWith(t => { lock (gate) requests.Remove(t); slots.Release(); }, TaskScheduler.Default);
+        }
+    }
+    private async Task Serve(HttpListenerContext context)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+        timeout.CancelAfter(options.RequestTimeoutMs);
+        // Aborting closes slow/incomplete uploads. Once parsed, dispatcher owns execution deadlines.
+        using var abort = timeout.Token.Register(() => { try { context.Response.Abort(); context.Request.InputStream.Close(); } catch (ObjectDisposedException) { } });
+        try
+        {
+            var request = context.Request;
+            ApiResponse result;
+            if (options.RequireAuth && !AuthenticationMiddleware.Authenticate(request.Headers["Authorization"], options.Token)) result = ApiResponse.Error(new ApiException(401, "UNAUTHORIZED", "A valid bearer token is required."));
+            else if (request.ContentLength64 > options.MaxRequestBytes) result = ApiResponse.Error(new ApiException(413, "PAYLOAD_TOO_LARGE", "Body exceeds the configured limit."));
+            else
+            {
+                using var body = new MemoryStream(); var buffer = new byte[4096]; int count;
+                while ((count = await request.InputStream.ReadAsync(buffer, 0, buffer.Length, timeout.Token).ConfigureAwait(false)) > 0)
+                { if (body.Length + count > options.MaxRequestBytes) throw new ApiException(413, "PAYLOAD_TOO_LARGE", "Body exceeds the configured limit."); body.Write(buffer, 0, count); }
+                timeout.CancelAfter(Timeout.Infinite);
+                string json;
+                try { json = new UTF8Encoding(false, true).GetString(body.ToArray()); } catch (DecoderFallbackException) { throw new ApiException(400, "INVALID_JSON", "Body must be UTF-8."); }
+                result = await router.Handle(request.HttpMethod, request.RawUrl ?? "/", request.Headers["Authorization"], request.Headers["Idempotency-Key"], json, request.ContentType).ConfigureAwait(false);
+            }
+            await Write(context, result).ConfigureAwait(false);
+        }
+        catch (ApiException e) { try { await Write(context, ApiResponse.Error(e)).ConfigureAwait(false); } catch { context.Response.Abort(); } }
+        catch (Exception e) { if (!stop.IsCancellationRequested) log("HTTP connection ended: " + e); try { context.Response.Abort(); } catch (ObjectDisposedException) { } }
+    }
+    private static async Task Write(HttpListenerContext context, ApiResponse response)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(response.Json);
+        context.Response.StatusCode = response.Status;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Headers["Cache-Control"] = "no-store";
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        if (response.Status == 401) context.Response.Headers["WWW-Authenticate"] = "Bearer";
+        if (response.Status == 429) context.Response.Headers["Retry-After"] = "1";
+        if (response.Status == 405) context.Response.Headers["Allow"] = context.Request.RawUrl?.StartsWith("/api/spawn/", StringComparison.Ordinal) == true || context.Request.RawUrl?.StartsWith("/api/player/", StringComparison.Ordinal) == true || context.Request.RawUrl?.StartsWith("/api/enemies/", StringComparison.Ordinal) == true ? "POST" : "GET";
+        context.Response.ContentLength64 = bytes.Length;
+        context.Response.KeepAlive = false;
+        await context.Response.OutputStream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+        context.Response.Close();
+    }
+    public async Task StopAsync()
+    {
+        stop.Cancel(); listener.Close();
+        if (acceptLoop != null) await acceptLoop.ConfigureAwait(false);
+        Task[] pending; lock (gate) { pending = new Task[requests.Count]; requests.CopyTo(pending); }
+        await Task.WhenAll(pending).ConfigureAwait(false); log("REST server stopped.");
+    }
+    public void Dispose() { StopAsync().GetAwaiter().GetResult(); stop.Dispose(); }
+}

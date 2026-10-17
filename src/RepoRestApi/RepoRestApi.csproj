@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../RepoRestApi.Core/RepoRestApi.Core.csproj" />
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" ExcludeAssets="runtime" />
+    <PackageReference Condition="'$(GameManagedPath)' == ''" Include="UnityEngine.Modules" Version="2022.3.62" IncludeAssets="compile" PrivateAssets="all" />
+    <PackageReference Condition="'$(GameManagedPath)' == ''" Include="R.E.P.O.GameLibs.Steam" Version="0.4.4-ngd.0" PrivateAssets="all" IncludeAssets="compile" />
+    <PackageReference Include="Zehs.REPOLib" Version="4.2.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(GameManagedPath)' != ''">
+    <Reference Include="$(GameManagedPath)/Assembly-CSharp.dll;$(GameManagedPath)/PhotonUnityNetworking.dll;$(GameManagedPath)/PhotonRealtime.dll;$(GameManagedPath)/Photon3Unity3D.dll;$(GameManagedPath)/UnityEngine.dll;$(GameManagedPath)/UnityEngine.CoreModule.dll;$(GameManagedPath)/UnityEngine.PhysicsModule.dll;$(GameManagedPath)/UnityEngine.AIModule.dll">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
