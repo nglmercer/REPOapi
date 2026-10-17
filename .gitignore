@@ -6,3 +6,7 @@ artifacts/staging/
 *.cfg
 *.log
 Directory.Repo.props
+
+# Client credentials are local configuration.
+.env
+.env.*

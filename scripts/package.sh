@@ -13,6 +13,9 @@ cp "$REPO_API_OUTPUT/REPOLib.dll" "$REPO_API_STAGE/BepInEx/plugins/REPOLib/"
 cp README.md LICENSE "$REPO_API_STAGE/"
 cp docs/*.md docs/openapi.json "$REPO_API_STAGE/docs/"
 cp third-party/* "$REPO_API_STAGE/third-party/"
+cp -R examples "$REPO_API_STAGE/examples"
+# Create a new archive so removed files cannot survive from an older package.
+rm -f -- "$REPO_API_ROOT/artifacts/RepoRestApi-1.0.0.zip"
 if command -v zip >/dev/null 2>&1; then
   (cd "$REPO_API_STAGE" && zip -qr "$REPO_API_ROOT/artifacts/RepoRestApi-1.0.0.zip" .)
 else

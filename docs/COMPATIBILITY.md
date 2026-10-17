@@ -1,5 +1,7 @@
 # Compatibility research
 
+[Documentation index](README.md) · [API reference](API.md)
+
 Research performed 2026-10-17. Source and binary inspection preceded game integration. Game code and proprietary assemblies are not redistributed.
 
 ## Pinned dependencies and evidence

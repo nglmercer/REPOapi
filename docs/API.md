@@ -1,5 +1,7 @@
 # API 1.0.0
 
+[Documentation index](README.md) · [Examples in four languages](EXAMPLES.md) · [Troubleshooting](TROUBLESHOOTING.md)
+
 Base URL: `http://127.0.0.1:17453`. All endpoints require `Authorization: Bearer <token>` unless authentication was explicitly disabled on loopback. JSON is UTF-8. [openapi.json](openapi.json) is also served by authenticated `GET /openapi.json`.
 
 ## Endpoints
@@ -44,14 +46,7 @@ Multiplayer replication has not been tested with multiple clients. Network objec
 
 Get IDs at runtime; no prefab list is hardcoded. Items/valuables use `PrefabRef.ResourcePath`, enemies use their `EnemySetup` asset name. IDs are case sensitive; ambiguous collisions are excluded. Entries include `id`, `name`, `category`, `spawnable` and `entitiesPerSpawn`. Content must have a valid prefab reference and root PhotonView. Disabled/nonphysical items, broken references and enemy setups with multiple spawn objects are excluded.
 
-```bash
-curl -H "Authorization: Bearer $REPO_API_TOKEN" \
-  'http://127.0.0.1:17453/api/catalog/items?search=health'
-curl -H "Authorization: Bearer $REPO_API_TOKEN" \
-  'http://127.0.0.1:17453/api/catalog/enemies'
-curl -H "Authorization: Bearer $REPO_API_TOKEN" \
-  'http://127.0.0.1:17453/api/players'
-```
+Use the [JavaScript](EXAMPLES.md#javascript-with-fetch), [Python](EXAMPLES.md#python-with-urllib), [curl](EXAMPLES.md#bash-and-curl) or [PowerShell](EXAMPLES.md#powershell-with-invoke-restmethod) examples to query these catalogs. Each client can list players and search content before building a spawn request.
 
 `search` is a case-insensitive name/ID substring. Optional `category` must match the plural catalog endpoint. Other query parameters are rejected. Metadata refreshes on scene/session changes, on every mutation, and at most three seconds after the previous catalog request. Registered mod content is included through REPOLib collections; enumeration never instantiates objects. Catalog availability does not guarantee a particular map has a sufficiently large collision-free spawn location.
 
@@ -66,17 +61,9 @@ curl -H "Authorization: Bearer $REPO_API_TOKEN" \
 
 Coordinates must be numeric and within ±10000. Prefab collider bounds are computed from existing asset components. Candidates must have a sufficiently level floor, fit without overlapping colliders or other requested positions, and, for enemies, be near a NavMesh. There are at most 48 attempts per entity. Unsupported collision shapes, missing bounds, no floor or no available space return 422. World position may adjust the Y coordinate to rest the object above the floor; it never silently changes X/Z. Quantity greater than one at one explicit world position will normally be rejected because the objects overlap. Geometry can move after validation; map-specific placement still needs gameplay testing.
 
-Set the IDs below to values returned by the current catalogs and player listing. The shell variables are placeholders for discovered IDs, not predefined game identifiers.
+The [example guide](EXAMPLES.md#every-endpoint-with-any-client) provides the request body for every spawning route, plus runnable catalog discovery in all four languages. All IDs must come from the matching current catalog; the request uses `itemId`, `enemyId`, `valuableId` or `upgradeId` according to the route.
 
-```bash
-curl -X POST 'http://127.0.0.1:17453/api/spawn/enemy' \
-  -H "Authorization: Bearer $REPO_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: my-unique-event-001' \
-  --data "{\"enemyId\":\"$ENEMY_ID\",\"quantity\":1,\"position\":{\"mode\":\"near_player\",\"playerId\":\"$PLAYER_ID\"}}"
-```
-
-The same pattern applies to `/api/spawn/item` with `itemId`, `/api/spawn/valuable` with `valuableId`, and `/api/spawn/upgrade` with `upgradeId`. Quantities default to 1 and must not exceed the configured limit (10 by default). Upgrades are physical pickups; direct player stat grants are not exposed.
+Quantities default to 1 and must not exceed the configured limit (10 by default). Upgrades are physical pickups; direct player stat grants are not exposed.
 
 Spawn success includes `result.spawned`, `result.count`, and `replicationVerified=false`. Enemy results also include the opaque entity `id` used for deletion. All positions are prevalidated, but exceptions during creation can still partially complete a batch. `500 SPAWN_FAILED` reports confirmed partial results in `error.details.spawned`; do not create a new key and blindly repeat the whole request.
 
@@ -90,7 +77,7 @@ Heal invokes `PlayerHealth.HealOther(amount, true)` and revive invokes `PlayerAv
 
 ## Idempotency, deadlines and errors
 
-Every POST requires `Idempotency-Key` (1–128 characters) and `Content-Type: application/json`. Use a unique key per intended command. Retrying the same key/body returns the same cached result, including errors. Simultaneous retries share one execution. Reusing a key with a different action/body returns 409. Keys and results live in bounded memory for at least ten minutes after admission; they do not survive restart. Do not reuse keys after that interval. The server returns 503 rather than evicting pending requests or recent outcomes when the 2048-key cache is full.
+Every POST requires `Idempotency-Key` (1–128 characters) and `Content-Type: application/json`. Use a unique key per intended command. Retrying the same key/body returns the same cached result, including errors. Simultaneous retries share one execution. Reusing a key with a different action/body returns 409. Preserve the original JSON property order when retrying: the current fingerprint strips formatting whitespace but does not sort object properties. Keys and results live in bounded memory for at least ten minutes after admission; they do not survive restart. Do not reuse keys after that interval. The server returns 503 rather than evicting pending requests or recent outcomes when the 2048-key cache is full.
 
 Only GET and POST are supported on their designated endpoints. Request bodies are limited to 16 KiB by default, with maximum JSON depth 16. Unknown fields, duplicate JSON properties, unknown IDs, nonnumeric/nonfinite coordinates and invalid quantities are rejected. Global authenticated request rate defaults to 20 per rolling second. HTTP concurrency and the game queue are bounded separately by QueueCapacity.
 

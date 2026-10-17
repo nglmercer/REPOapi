@@ -1,5 +1,7 @@
 # Architecture
 
+[Documentation index](README.md) · [API reference](API.md)
+
 `RepoRestApi.Core` targets .NET Standard 2.1 and has no Unity references. `RepoRestApi` is the BepInEx entry point and the direct game adapter. The test project targets .NET 8 and substitutes an adapter. There is no web framework, reflection bridge, Harmony patch or external runtime in the mod.
 
 ```text
