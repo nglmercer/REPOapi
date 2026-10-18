@@ -71,3 +71,13 @@ The following checks are **pending**, and `/api/capabilities` reports `multiplay
 - [ ] Quit normally during pending requests and confirm listener and worker cleanup.
 
 Runtime probing does not replace this checklist. There is no fabricated gameplay pass or second-client test.
+
+
+## Enemy placement correction (2026-10-18)
+
+A live quantity-one Duck request using `random_valid` returned 422 `NO_SAFE_POSITION`, with no objects spawned. Read-only inspection of the installed game's `resources.assets` identified two placement mismatches:
+
+- All 26 serialized NavMeshAgent components use agent type `-334000983`; Duck uses this type with walkable mask `1`. The area-mask-only SamplePosition overload queried default agent type 0. Placement now uses the selected prefab agent's type and area mask, including disabled prefab agents.
+- Duck has an inactive child named Plane with a non-trigger 10x10 BoxCollider. Bounds previously included inactive branches. Bounds now exclude disabled colliders and inactive child branches, without depending on prefab activeInHierarchy.
+
+The mod builds against the installed game assemblies. The 41 core tests pass; these tests do not execute Unity physics. Regression verification after restarting the game: enter a host level, spawn one Duck near/random player and one at random_valid, verify initialized AI and collision-free placement; retain 422 for genuinely blocked positions. No successful post-correction gameplay result has been recorded yet. No collision or navigation checks were bypassed, and no automatic retry was added.

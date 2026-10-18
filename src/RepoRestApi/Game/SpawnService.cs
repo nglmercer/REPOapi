@@ -22,7 +22,13 @@ internal sealed class SpawnService
         bool any = false; Bounds result = default;
         foreach (var collider in prefab.GetComponentsInChildren<Collider>(true))
         {
-            if (collider.isTrigger) continue;
+            if (collider.isTrigger || !collider.enabled) continue;
+            // Prefabs are not scene instances: activeInHierarchy is unsuitable here.
+            // Ignore inactive child branches (Duck includes an inactive 10x10 plane).
+            bool active = true;
+            for (var child = collider.transform; child != prefab.transform && child != null; child = child.parent)
+                if (!child.gameObject.activeSelf) { active = false; break; }
+            if (!active) continue;
             Bounds local;
             if (collider is BoxCollider box) local = new Bounds(box.center, box.size);
             else if (collider is SphereCollider sphere) local = new Bounds(sphere.center, Vector3.one * sphere.radius * 2);
@@ -63,7 +69,7 @@ internal sealed class SpawnService
             + mesh.vertices[mesh.indices[triangle + 1]] * (root * (1 - fraction))
             + mesh.vertices[mesh.indices[triangle + 2]] * (root * fraction);
     }
-    private List<Vector3> Positions(PositionRequest request, Bounds bounds, int quantity, bool enemy)
+    private List<Vector3> Positions(PositionRequest request, Bounds bounds, int quantity, NavMeshQueryFilter? enemyNavigation)
     {
         var positions = new List<Vector3>(); var occupied = new List<Bounds>();
         NavMeshTriangulation? navigation = request.Mode == "random_valid" ? NavMesh.CalculateTriangulation() : (NavMeshTriangulation?)null;
@@ -86,9 +92,9 @@ internal sealed class SpawnService
                 if (!Physics.Raycast(candidate + Vector3.up * 2, Vector3.down, out var floor, 6f, ~0, QueryTriggerInteraction.Ignore) || floor.normal.y < 0.75f || floor.collider.attachedRigidbody != null) continue;
                 if (Mathf.Abs(floor.point.y - candidate.y) > 4f) continue;
                 var destination = new Vector3(candidate.x, floor.point.y + extents.y - bounds.center.y + 0.05f, candidate.z);
-                if (enemy)
+                if (enemyNavigation.HasValue)
                 {
-                    if (!NavMesh.SamplePosition(floor.point, out var nav, 0.75f, NavMesh.AllAreas) || Vector3.Distance(nav.position, floor.point) > 0.75f) continue;
+                    if (!NavMesh.SamplePosition(floor.point, out var nav, 0.75f, enemyNavigation.Value) || Vector3.Distance(nav.position, floor.point) > 0.75f) continue;
                 }
                 var volume = new Bounds(destination + bounds.center, extents * 2);
                 if (Physics.CheckBox(volume.center, extents, Quaternion.identity, ~0, QueryTriggerInteraction.Ignore) || occupied.Any(b => b.Intersects(volume))) continue;
@@ -105,7 +111,16 @@ internal sealed class SpawnService
         if (quantity * entry.Prefabs.Length > maximum) throw new ApiException(400, "INVALID_QUANTITY", "Enemy group size multiplied by quantity exceeds the entity limit.");
         // Multi-object enemy setups can spawn overlapping objects at one point. Decline rather than alter REPOLib's setup semantics.
         if (entry.Prefabs.Length != 1) throw new ApiException(422, "UNSUPPORTED_ENEMY_GROUP", "This version only supports enemy setups with one spawn object.");
-        var positions = Positions(position, Shape(entry.Prefabs[0]), quantity, category == "enemy");
+        NavMeshQueryFilter? navigation = null;
+        if (category == "enemy")
+        {
+            // R.E.P.O. uses a custom agent type, including on disabled prefab agents.
+            // The area-mask-only overload queries agent type 0 and rejects its floors.
+            var agent = entry.Prefabs[0].GetComponentInChildren<NavMeshAgent>(true);
+            if (agent == null) throw new ApiException(422, "UNSUPPORTED_NAVIGATION", "Enemy prefab has no navigation agent for safe placement.");
+            navigation = new NavMeshQueryFilter { agentTypeID = agent.agentTypeID, areaMask = agent.areaMask };
+        }
+        var positions = Positions(position, Shape(entry.Prefabs[0]), quantity, navigation);
         var spawned = new List<object>();
         try
         {
