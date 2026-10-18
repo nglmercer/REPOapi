@@ -75,6 +75,9 @@ public sealed class CoreTests
     [InlineData("[]")]
     [InlineData("{} {}")]
     [InlineData("{\"a\":1,\"a\":2}")]
+    [InlineData("/* comment */ {}")]
+    [InlineData("{\"itemId\":/* hidden */\"registered\",\"position\":{\"mode\":\"random_valid\"}}")]
+    [InlineData("{\"itemId\":\"registered\",\"position\":{\"mode\":/* nested */\"random_valid\"}}")]
     public async Task InvalidJson(string body)
     { using var d = new MainThreadDispatcher(1); var r = new ApiRouter(Options(), new FakeGame(), d); Assert.Contains("INVALID_JSON", (await Post(r, body)).Json); }
     [Theory]
@@ -140,6 +143,58 @@ public sealed class CoreTests
     [Fact]
     public void RemoteBindingRequiresOptInAndAuthentication()
     { var o = Options(); o.Host = "0.0.0.0"; Assert.Throws<ArgumentException>(o.Validate); o.AllowRemote = true; o.RequireAuth = false; Assert.Throws<ArgumentException>(o.Validate); o.RequireAuth = true; o.Validate(); }
+    [Theory]
+    [InlineData("/api/players/")]
+    [InlineData("/api/players/id/extra")]
+    public async Task RejectsMalformedPlayerRoutes(string path)
+    {
+        using var d = new MainThreadDispatcher(4);
+        var r = new ApiRouter(Options(), new FakeGame(), d);
+        Assert.Equal(404, (await r.Handle("GET", path, "Bearer " + Token)).Status);
+    }
+    [Theory]
+    [InlineData("/health?search=test")]
+    [InlineData("/api/catalog/items?search=a&search=b")]
+    [InlineData("/api/catalog/items?category=items&category=items")]
+    public async Task RejectsUnsupportedOrDuplicateFilters(string path)
+    {
+        using var d = new MainThreadDispatcher(4);
+        var r = new ApiRouter(Options(), new FakeGame(), d);
+        Assert.Equal(400, (await r.Handle("GET", path, "Bearer " + Token)).Status);
+    }
+    [Theory]
+    [InlineData("{\"mode\":\"random_valid\",\"x\":0}")]
+    [InlineData("{\"mode\":\"random_player\",\"playerId\":\"ignored\"}")]
+    [InlineData("{\"mode\":\"near_player\",\"playerId\":\"current\",\"z\":0}")]
+    [InlineData("{\"mode\":\"world_position\",\"playerId\":\"ignored\",\"x\":0,\"y\":0,\"z\":0}")]
+    public async Task PositionFieldsMustMatchMode(string position)
+    {
+        using var d = new MainThreadDispatcher(4);
+        var r = new ApiRouter(Options(), new FakeGame(), d);
+        Assert.Contains("INVALID_POSITION", (await Post(r, "{\"itemId\":\"registered\",\"position\":" + position + "}")).Json);
+    }
+    [Fact]
+    public async Task CancelledWorkDoesNotConsumeFrameBudget()
+    {
+        using var d = new MainThreadDispatcher(4);
+        var expired = d.Execute(() => throw new InvalidOperationException("Must never execute"), 20);
+        await Assert.ThrowsAsync<ApiException>(() => expired);
+        var live = d.Execute(() => new ApiResponse(200, new { }), 1000);
+        d.Pump(1);
+        Assert.Equal(200, (await live.WaitAsync(TimeSpan.FromMilliseconds(500))).Status);
+    }
+    [Fact]
+    public async Task IdempotencyRetainsFailuresAndSharesSynchronousExceptions()
+    {
+        var store = new IdempotencyStore();
+        int calls = 0;
+        Task<ApiResponse> Action() { calls++; throw new ApiException(409, "EXPECTED", "Expected failure."); }
+        var first = await store.Run("failure", "body", Action);
+        var retry = await store.Run("failure", "body", Action);
+        Assert.Equal(1, calls);
+        Assert.Equal(409, first.Status);
+        Assert.Equal(first.Json, retry.Json);
+    }
     [Fact]
     public async Task RealHttpConcurrentRequestsAndCleanShutdown()
     {
@@ -149,6 +204,6 @@ public sealed class CoreTests
         var requests = Enumerable.Range(0, 12).Select(async i => { using var message = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:" + port + "/api/spawn/item"); message.Headers.Add("Idempotency-Key", "http-" + i); message.Content = new StringContent(Body, Encoding.UTF8, "application/json"); return await client.SendAsync(message); }).ToArray();
         for (int i = 0; !Task.WhenAll(requests).IsCompleted && i < 1000; i++) { d.Pump(64); await Task.Delay(2); }
         var responses = await Task.WhenAll(requests).WaitAsync(TimeSpan.FromSeconds(3)); Assert.All(responses, x => Assert.Equal(HttpStatusCode.OK, x.StatusCode)); Assert.Equal(12, game.Spawns); foreach (var response in responses) response.Dispose();
-        d.Dispose(); await server.StopAsync().WaitAsync(TimeSpan.FromSeconds(3));
+        d.Dispose(); var shutdown = server.StopAsync(); Assert.Same(shutdown, server.StopAsync()); await shutdown.WaitAsync(TimeSpan.FromSeconds(3)); server.Dispose(); server.Dispose();
     }
 }

@@ -13,7 +13,13 @@ cp "$REPO_API_OUTPUT/REPOLib.dll" "$REPO_API_STAGE/BepInEx/plugins/REPOLib/"
 cp README.md LICENSE "$REPO_API_STAGE/"
 cp docs/*.md docs/openapi.json "$REPO_API_STAGE/docs/"
 cp third-party/* "$REPO_API_STAGE/third-party/"
-cp -R examples "$REPO_API_STAGE/examples"
+mkdir -p "$REPO_API_STAGE/examples"
+cp examples/README.md "$REPO_API_STAGE/examples/"
+# Ship example sources only, excluding local caches and credentials.
+for REPO_API_EXAMPLE in examples/curl/*.sh examples/javascript/*.mjs examples/python/*.py examples/powershell/*.ps1; do
+  mkdir -p "$REPO_API_STAGE/$(dirname -- "$REPO_API_EXAMPLE")"
+  cp "$REPO_API_EXAMPLE" "$REPO_API_STAGE/$REPO_API_EXAMPLE"
+done
 # Create a new archive so removed files cannot survive from an older package.
 rm -f -- "$REPO_API_ROOT/artifacts/RepoRestApi-1.0.0.zip"
 if command -v zip >/dev/null 2>&1; then

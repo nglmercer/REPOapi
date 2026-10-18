@@ -22,7 +22,7 @@ internal sealed class GameStateService : IGameAdapter
     public GameStateService(ApiOptions options, Action<string> log)
     {
         this.options = options;
-        catalogs = new CatalogService(log); spawning = new SpawnService(catalogs, players, options.MaxSpawnQuantity);
+        catalogs = new CatalogService(log); spawning = new SpawnService(catalogs, players, options.MaxSpawnQuantity, log, options.Verbose);
     }
     public void ObserveSession()
     {

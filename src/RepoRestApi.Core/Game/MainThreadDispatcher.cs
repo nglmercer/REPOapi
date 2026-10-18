@@ -19,16 +19,21 @@ public sealed class MainThreadDispatcher : IDisposable
     private readonly Queue<Work> queue = new Queue<Work>();
     private readonly int capacity;
     private bool stopped;
-    public MainThreadDispatcher(int capacity) { this.capacity = capacity; }
+    public MainThreadDispatcher(int capacity) { if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity)); this.capacity = capacity; }
     public async Task<ApiResponse> Execute(Func<ApiResponse> action, int timeoutMs)
     {
+        if (action == null) throw new ArgumentNullException(nameof(action));
+        if (timeoutMs < 1) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
         var work = new Work { Action = action, Deadline = Stopwatch.GetTimestamp() + timeoutMs * Stopwatch.Frequency / 1000 };
         lock (gate)
         {
             if (stopped) throw new ApiException(503, "SHUTTING_DOWN", "The dispatcher is stopping.");
-            // Remove expired work so an unpumped queue cannot retain dead requests indefinitely.
-            var count = queue.Count;
-            while (count-- > 0) { var old = queue.Dequeue(); if (old.State == 0) queue.Enqueue(old); }
+            // Compact only under capacity pressure; normal admission stays O(1).
+            if (queue.Count >= capacity)
+            {
+                var count = queue.Count;
+                while (count-- > 0) { var old = queue.Dequeue(); if (old.State == 0) queue.Enqueue(old); }
+            }
             if (queue.Count >= capacity) throw new ApiException(503, "QUEUE_FULL", "The game command queue is full.");
             queue.Enqueue(work);
         }
@@ -40,7 +45,7 @@ public sealed class MainThreadDispatcher : IDisposable
     }
     public void Pump(int limit)
     {
-        for (int i = 0; i < limit; i++)
+        for (int i = 0; i < limit;)
         {
             Work work;
             lock (gate)
@@ -51,6 +56,7 @@ public sealed class MainThreadDispatcher : IDisposable
                 if (Stopwatch.GetTimestamp() >= work.Deadline) { work.State = 2; work.Completion.TrySetException(new ApiException(504, "COMMAND_TIMEOUT", "Command expired before execution; no action was performed.")); continue; }
                 work.State = 1;
             }
+            i++;
             try { work.Completion.TrySetResult(work.Action()); }
             catch (Exception e) { work.Completion.TrySetException(e); }
             finally { lock (gate) work.State = 2; }

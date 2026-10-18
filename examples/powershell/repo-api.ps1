@@ -15,6 +15,7 @@ $request = @{
     Method = $Method
     Headers = @{ Authorization = "Bearer $($env:REPO_API_TOKEN.Trim())" }
     TimeoutSec = 15
+    MaximumRedirection = 0
 }
 if ($Method -eq 'POST') {
     if (-not $IdempotencyKey) { $IdempotencyKey = [Guid]::NewGuid().ToString() }

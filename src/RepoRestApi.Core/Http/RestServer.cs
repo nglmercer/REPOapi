@@ -18,10 +18,13 @@ public sealed class RestServer : IDisposable
     private readonly HashSet<Task> requests = new HashSet<Task>();
     private readonly SemaphoreSlim slots;
     private Task? acceptLoop;
+    private Task? shutdown;
+    private bool disposed;
     public RestServer(ApiOptions options, ApiRouter router, Action<string> log) { options.Validate(); this.options = options; this.router = router; this.log = log; slots = new SemaphoreSlim(options.QueueCapacity); }
     public void Start()
     {
-        string host = options.Host.Contains(":") ? "[" + options.Host + "]" : options.Host;
+        string address = IPAddress.Parse(options.Host).ToString();
+        string host = address.Contains(":") ? "[" + address + "]" : address;
         listener.Prefixes.Add("http://" + host + ":" + options.Port + "/");
         listener.Start(); acceptLoop = Accept(); log("REST server listening on " + options.Host + ":" + options.Port);
     }
@@ -32,7 +35,7 @@ public sealed class RestServer : IDisposable
             HttpListenerContext context;
             try { context = await listener.GetContextAsync().ConfigureAwait(false); }
             catch (Exception e) when (e is HttpListenerException || e is ObjectDisposedException) { if (!stop.IsCancellationRequested) log("HTTP accept stopped: " + e.GetType().Name); return; }
-            if (!slots.Wait(0)) { try { await Write(context, ApiResponse.Error(new ApiException(503, "SERVER_BUSY", "HTTP request capacity exceeded."))).ConfigureAwait(false); } catch { context.Response.Abort(); } continue; }
+            if (!slots.Wait(0)) { try { await WriteBounded(context, ApiResponse.Error(new ApiException(503, "SERVER_BUSY", "HTTP request capacity exceeded."))).ConfigureAwait(false); } catch { context.Response.Abort(); } continue; }
             Task task = Serve(context);
             lock (gate) requests.Add(task);
             _ = task.ContinueWith(t => { lock (gate) requests.Remove(t); slots.Release(); }, TaskScheduler.Default);
@@ -60,10 +63,17 @@ public sealed class RestServer : IDisposable
                 try { json = new UTF8Encoding(false, true).GetString(body.ToArray()); } catch (DecoderFallbackException) { throw new ApiException(400, "INVALID_JSON", "Body must be UTF-8."); }
                 result = await router.Handle(request.HttpMethod, request.RawUrl ?? "/", request.Headers["Authorization"], request.Headers["Idempotency-Key"], json, request.ContentType).ConfigureAwait(false);
             }
-            await Write(context, result).ConfigureAwait(false);
+            await WriteBounded(context, result).ConfigureAwait(false);
         }
-        catch (ApiException e) { try { await Write(context, ApiResponse.Error(e)).ConfigureAwait(false); } catch { context.Response.Abort(); } }
+        catch (ApiException e) { try { await WriteBounded(context, ApiResponse.Error(e)).ConfigureAwait(false); } catch { context.Response.Abort(); } }
         catch (Exception e) { if (!stop.IsCancellationRequested) log("HTTP connection ended: " + e); try { context.Response.Abort(); } catch (ObjectDisposedException) { } }
+    }
+    private async Task WriteBounded(HttpListenerContext context, ApiResponse response)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+        deadline.CancelAfter(options.RequestTimeoutMs);
+        using var abort = deadline.Token.Register(() => { try { context.Response.Abort(); } catch (ObjectDisposedException) { } });
+        await Write(context, response).ConfigureAwait(false);
     }
     private static async Task Write(HttpListenerContext context, ApiResponse response)
     {
@@ -80,12 +90,25 @@ public sealed class RestServer : IDisposable
         await context.Response.OutputStream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
         context.Response.Close();
     }
-    public async Task StopAsync()
+    public Task StopAsync()
+    {
+        lock (gate) return shutdown ??= StopCoreAsync();
+    }
+    private async Task StopCoreAsync()
     {
         stop.Cancel(); listener.Close();
         if (acceptLoop != null) await acceptLoop.ConfigureAwait(false);
         Task[] pending; lock (gate) { pending = new Task[requests.Count]; requests.CopyTo(pending); }
         await Task.WhenAll(pending).ConfigureAwait(false); log("REST server stopped.");
     }
-    public void Dispose() { StopAsync().GetAwaiter().GetResult(); stop.Dispose(); }
+    public void Dispose()
+    {
+        StopAsync().GetAwaiter().GetResult();
+        lock (gate)
+        {
+            if (disposed) return;
+            disposed = true;
+            stop.Dispose();
+        }
+    }
 }

@@ -21,37 +21,44 @@ internal sealed class CatalogService
 {
     private readonly Action<string> log;
     private readonly Dictionary<string, List<CatalogEntry>> cache = new Dictionary<string, List<CatalogEntry>>();
-    private float refreshed = -100;
+    private readonly Dictionary<string, float> refreshed = new Dictionary<string, float>();
     public CatalogService(Action<string> log) { this.log = log; }
-    public void Reset() { cache.Clear(); refreshed = -100; }
+    public void Reset() { cache.Clear(); refreshed.Clear(); }
     private static bool Valid(PrefabRef? p) => p != null && p.IsValid() && !string.IsNullOrWhiteSpace(p.ResourcePath) && p.Prefab != null && p.Prefab.GetComponent<PhotonView>() != null;
     public List<CatalogEntry> Entries(string category)
     {
-        if (Time.realtimeSinceStartup - refreshed >= 3 || cache.Count == 0) Refresh();
+        if (!refreshed.TryGetValue(category, out float timestamp) || Time.realtimeSinceStartup - timestamp >= 3)
+        {
+            cache[category] = Build(category);
+            refreshed[category] = Time.realtimeSinceStartup;
+        }
         return cache[category];
     }
-    private void Refresh()
+    private List<CatalogEntry> Build(string category, string? id = null)
     {
         var items = new List<CatalogEntry>(); var valuables = new List<CatalogEntry>(); var enemies = new List<CatalogEntry>();
+        if (category == "items" || category == "upgrades")
         foreach (var item in Items.AllItems.Concat(Items.RegisteredItems).Distinct())
         {
             try
             {
-                if (item == null || string.IsNullOrWhiteSpace(item.itemName) || item.disabled || !item.physicalItem || !Valid(item.prefab)) continue;
+                if (item == null || item.prefab == null || (id != null && item.prefab.ResourcePath != id) || string.IsNullOrWhiteSpace(item.itemName) || item.disabled || !item.physicalItem || !Valid(item.prefab)) continue;
                 items.Add(new CatalogEntry { Id = item.prefab.ResourcePath, Name = item.itemName, Category = IsUpgrade(item) ? "upgrade" : "item", Item = item, Prefabs = new[] { item.prefab.Prefab } });
             }
             catch (Exception e) { log("Invalid item catalog entry: " + e.GetType().Name); }
         }
+        if (category == "valuables")
         foreach (var p in Valuables.AllValuables.Concat(Valuables.RegisteredValuables).Distinct())
         {
-            try { if (Valid(p) && p.Prefab.GetComponent<ValuableObject>() != null) valuables.Add(new CatalogEntry { Id = p.ResourcePath, Name = p.PrefabName, Category = "valuable", Valuable = p, Prefabs = new[] { p.Prefab } }); }
+            try { if (p != null && (id == null || p.ResourcePath == id) && Valid(p) && p.Prefab.GetComponent<ValuableObject>() != null) valuables.Add(new CatalogEntry { Id = p.ResourcePath, Name = p.PrefabName, Category = "valuable", Valuable = p, Prefabs = new[] { p.Prefab } }); }
             catch (Exception e) { log("Invalid valuable catalog entry: " + e.GetType().Name); }
         }
+        if (category == "enemies")
         foreach (var enemy in REPOLib.Modules.Enemies.AllEnemies.Concat(REPOLib.Modules.Enemies.RegisteredEnemies).Distinct())
         {
             try
             {
-                if (enemy == null || enemy.spawnObjects == null || enemy.spawnObjects.Count != 1 || enemy.spawnObjects.Any(p => !Valid(p) || p.Prefab.GetComponent<EnemyParent>() == null)) continue;
+                if (enemy == null || (id != null && enemy.name != id) || enemy.spawnObjects == null || enemy.spawnObjects.Count != 1 || enemy.spawnObjects.Any(p => !Valid(p) || p.Prefab.GetComponent<EnemyParent>() == null)) continue;
                 // Setup name is a real asset name, not a hand-maintained enemy alias.
                 enemies.Add(new CatalogEntry { Id = enemy.name, Name = enemy.name, Category = "enemy", Enemy = enemy, Prefabs = enemy.spawnObjects.Select(p => p.Prefab).ToArray() });
             }
@@ -59,8 +66,9 @@ internal sealed class CatalogService
         }
         // Reject ambiguous identifiers instead of selecting an arbitrary third-party asset.
         List<CatalogEntry> Unique(IEnumerable<CatalogEntry> entries) => entries.Where(e => !string.IsNullOrWhiteSpace(e.Id) && e.Id.Length <= 256).GroupBy(e => e.Id, StringComparer.Ordinal).Where(g => g.Select(e => (object?)e.Item ?? e.Valuable ?? (object?)e.Enemy).Distinct().Count() == 1).Select(g => g.First()).OrderBy(e => e.Id, StringComparer.Ordinal).ToList();
-        cache["items"] = Unique(items); cache["upgrades"] = Unique(items.Where(e => e.Category == "upgrade"));
-        cache["valuables"] = Unique(valuables); cache["enemies"] = Unique(enemies); refreshed = Time.realtimeSinceStartup;
+        if (category == "items") return Unique(items);
+        if (category == "upgrades") return Unique(items).Where(e => e.Category == "upgrade").ToList();
+        return Unique(category == "enemies" ? enemies : valuables);
     }
     private static bool IsUpgrade(Item item) => item.itemType == SemiFunc.itemType.player_upgrade || item.itemType == SemiFunc.itemType.item_upgrade;
     public object List(string category, string? search)
@@ -70,8 +78,9 @@ internal sealed class CatalogService
     }
     public CatalogEntry Resolve(string category, string id)
     {
-        // Refresh on every mutation: revalidate registrations and prefabs at execution time.
-        Reset(); var entry = Entries(category).SingleOrDefault(e => e.Id == id);
+        // Read current registrations and reject duplicate IDs, but resolve/load only the
+        // requested asset. Full catalog scans here can load unrelated prefabs and hitch Unity.
+        var entry = Build(category, id).SingleOrDefault();
         return entry ?? throw new ApiException(404, "UNKNOWN_OBJECT_ID", "ID is not in the current " + category + " catalog.");
     }
 }

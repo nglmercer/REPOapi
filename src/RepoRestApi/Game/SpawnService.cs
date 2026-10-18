@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using Photon.Pun;
 using RepoRestApi.Core.Models;
@@ -13,13 +14,16 @@ internal sealed class SpawnService
     private readonly CatalogService catalogs;
     private readonly PlayerService players;
     private readonly int maximum;
+    private readonly Action<string> log;
+    private readonly bool verbose;
     private readonly Dictionary<string, GameObject> createdEnemies = new Dictionary<string, GameObject>();
     private readonly Dictionary<EnemyParent, string> enemyIds = new Dictionary<EnemyParent, string>();
-    public SpawnService(CatalogService catalogs, PlayerService players, int maximum) { this.catalogs = catalogs; this.players = players; this.maximum = maximum; }
+    public SpawnService(CatalogService catalogs, PlayerService players, int maximum, Action<string> log, bool verbose) { this.catalogs = catalogs; this.players = players; this.maximum = maximum; this.log = log; this.verbose = verbose; }
     public void Reset() { createdEnemies.Clear(); enemyIds.Clear(); }
     private static Bounds Shape(GameObject prefab)
     {
         bool any = false; Bounds result = default;
+        var inverseRotation = Quaternion.Inverse(prefab.transform.rotation);
         foreach (var collider in prefab.GetComponentsInChildren<Collider>(true))
         {
             if (collider.isTrigger || !collider.enabled) continue;
@@ -43,14 +47,15 @@ internal sealed class SpawnService
             for (int x = -1; x <= 1; x += 2) for (int y = -1; y <= 1; y += 2) for (int z = -1; z <= 1; z += 2)
                     {
                         // Preserve prefab scale and child transforms; spawn rotation is identity.
-                        var point = Quaternion.Inverse(prefab.transform.rotation) * (collider.transform.TransformPoint(local.center + Vector3.Scale(local.extents, new Vector3(x, y, z))) - prefab.transform.position);
+                        var point = inverseRotation * (collider.transform.TransformPoint(local.center + Vector3.Scale(local.extents, new Vector3(x, y, z))) - prefab.transform.position);
                         if (!any) { result = new Bounds(point, Vector3.zero); any = true; } else result.Encapsulate(point);
                     }
         }
-        if (!any || result.size.sqrMagnitude < 0.0001f || result.size.magnitude > 40 || float.IsNaN(result.size.sqrMagnitude) || float.IsInfinity(result.size.sqrMagnitude))
+        if (!any || !Finite(result.center) || result.size.sqrMagnitude < 0.0001f || result.size.magnitude > 40 || float.IsNaN(result.size.sqrMagnitude) || float.IsInfinity(result.size.sqrMagnitude))
             throw new ApiException(422, "UNSUPPORTED_BOUNDS", "No finite, usable collider bounds are available for safe placement.");
         return result;
     }
+    private static bool Finite(Vector3 value) => !float.IsNaN(value.x) && !float.IsInfinity(value.x) && !float.IsNaN(value.y) && !float.IsInfinity(value.y) && !float.IsNaN(value.z) && !float.IsInfinity(value.z);
     private Vector3 Origin(PositionRequest position, NavMeshTriangulation? navigation = null)
     {
         if (position.Mode == "world_position") return new Vector3(position.X!.Value, position.Y!.Value, position.Z!.Value);
@@ -73,7 +78,7 @@ internal sealed class SpawnService
     {
         var positions = new List<Vector3>(); var occupied = new List<Bounds>();
         NavMeshTriangulation? navigation = request.Mode == "random_valid" ? NavMesh.CalculateTriangulation() : (NavMeshTriangulation?)null;
-        Vector3 origin = Origin(request, navigation);
+        Vector3 origin = request.Mode == "random_valid" ? Vector3.zero : Origin(request, navigation);
         var extents = bounds.extents + Vector3.one * 0.08f;
         for (int i = 0; i < quantity; i++)
         {
@@ -106,47 +111,63 @@ internal sealed class SpawnService
     }
     public object Spawn(string category, string id, int quantity, PositionRequest position)
     {
-        string plural = category == "enemy" ? "enemies" : category == "valuable" ? "valuables" : category == "upgrade" ? "upgrades" : "items";
-        var entry = catalogs.Resolve(plural, id);
-        if (quantity * entry.Prefabs.Length > maximum) throw new ApiException(400, "INVALID_QUANTITY", "Enemy group size multiplied by quantity exceeds the entity limit.");
-        // Multi-object enemy setups can spawn overlapping objects at one point. Decline rather than alter REPOLib's setup semantics.
-        if (entry.Prefabs.Length != 1) throw new ApiException(422, "UNSUPPORTED_ENEMY_GROUP", "This version only supports enemy setups with one spawn object.");
-        NavMeshQueryFilter? navigation = null;
-        if (category == "enemy")
-        {
-            // R.E.P.O. uses a custom agent type, including on disabled prefab agents.
-            // The area-mask-only overload queries agent type 0 and rejects its floors.
-            var agent = entry.Prefabs[0].GetComponentInChildren<NavMeshAgent>(true);
-            if (agent == null) throw new ApiException(422, "UNSUPPORTED_NAVIGATION", "Enemy prefab has no navigation agent for safe placement.");
-            navigation = new NavMeshQueryFilter { agentTypeID = agent.agentTypeID, areaMask = agent.areaMask };
-        }
-        var positions = Positions(position, Shape(entry.Prefabs[0]), quantity, navigation);
-        var spawned = new List<object>();
+        var clock = Stopwatch.StartNew();
+        long catalogMs = 0, placementMs = 0;
+        string stage = "catalog";
         try
         {
-            foreach (var destination in positions)
+            string plural = category == "enemy" ? "enemies" : category == "valuable" ? "valuables" : category == "upgrade" ? "upgrades" : "items";
+            var entry = catalogs.Resolve(plural, id);
+            if (quantity * entry.Prefabs.Length > maximum) throw new ApiException(400, "INVALID_QUANTITY", "Enemy group size multiplied by quantity exceeds the entity limit.");
+            // Multi-object enemy setups can spawn overlapping objects at one point. Decline rather than alter REPOLib's setup semantics.
+            if (entry.Prefabs.Length != 1) throw new ApiException(422, "UNSUPPORTED_ENEMY_GROUP", "This version only supports enemy setups with one spawn object.");
+            catalogMs = clock.ElapsedMilliseconds;
+            stage = "placement";
+            NavMeshQueryFilter? navigation = null;
+            if (category == "enemy")
             {
-                GameObject? instance;
-                if (entry.Enemy != null)
-                {
-                    var parents = REPOLib.Modules.Enemies.SpawnEnemy(entry.Enemy, destination, Quaternion.identity);
-                    if (parents == null || parents.Count != 1 || parents[0] == null) throw new InvalidOperationException("REPOLib did not return the expected enemy.");
-                    instance = parents[0].gameObject;
-                    string enemyId = System.Guid.NewGuid().ToString("N");
-                    createdEnemies.Add(enemyId, instance); enemyIds[parents[0]] = enemyId;
-                    spawned.Add(new { id = enemyId, catalogId = id, position = Coordinates(instance.transform.position) });
-                }
-                else
-                {
-                    instance = entry.Item != null ? Items.SpawnItem(entry.Item, destination, Quaternion.identity) : Valuables.SpawnValuable(entry.Valuable, destination, Quaternion.identity);
-                    if (instance == null) throw new InvalidOperationException("REPOLib returned no spawned object.");
-                    spawned.Add(new { catalogId = id, position = Coordinates(instance.transform.position) });
-                }
-                if (instance == null || instance.GetComponent<PhotonView>() == null) throw new InvalidOperationException("Spawned object has no network view.");
+                // R.E.P.O. uses a custom agent type, including on disabled prefab agents.
+                // The area-mask-only overload queries agent type 0 and rejects its floors.
+                var agent = entry.Prefabs[0].GetComponentInChildren<NavMeshAgent>(true);
+                if (agent == null) throw new ApiException(422, "UNSUPPORTED_NAVIGATION", "Enemy prefab has no navigation agent for safe placement.");
+                navigation = new NavMeshQueryFilter { agentTypeID = agent.agentTypeID, areaMask = agent.areaMask };
             }
+            var positions = Positions(position, Shape(entry.Prefabs[0]), quantity, navigation);
+            placementMs = clock.ElapsedMilliseconds - catalogMs;
+            stage = "instantiate";
+            var spawned = new List<object>();
+            try
+            {
+                foreach (var destination in positions)
+                {
+                    GameObject? instance;
+                    if (entry.Enemy != null)
+                    {
+                        var parents = REPOLib.Modules.Enemies.SpawnEnemy(entry.Enemy, destination, Quaternion.identity);
+                        if (parents == null || parents.Count != 1 || parents[0] == null) throw new InvalidOperationException("REPOLib did not return the expected enemy.");
+                        instance = parents[0].gameObject;
+                        string enemyId = System.Guid.NewGuid().ToString("N");
+                        createdEnemies.Add(enemyId, instance); enemyIds[parents[0]] = enemyId;
+                        spawned.Add(new { id = enemyId, catalogId = id, position = Coordinates(instance.transform.position) });
+                    }
+                    else
+                    {
+                        instance = entry.Item != null ? Items.SpawnItem(entry.Item, destination, Quaternion.identity) : Valuables.SpawnValuable(entry.Valuable, destination, Quaternion.identity);
+                        if (instance == null) throw new InvalidOperationException("REPOLib returned no spawned object.");
+                        spawned.Add(new { catalogId = id, position = Coordinates(instance.transform.position) });
+                    }
+                    if (instance == null || instance.GetComponent<PhotonView>() == null) throw new InvalidOperationException("Spawned object has no network view.");
+                }
+            }
+            catch (Exception e) { throw new ApiException(500, "SPAWN_FAILED", "Spawn failed after " + spawned.Count + " confirmed objects; do not retry with a new key without checking the result. " + e.GetType().Name, new { spawned }); }
+            return new { spawned, count = spawned.Count, replicationVerified = false };
         }
-        catch (Exception e) { throw new ApiException(500, "SPAWN_FAILED", "Spawn failed after " + spawned.Count + " confirmed objects; do not retry with a new key without checking the result. " + e.GetType().Name, new { spawned }); }
-        return new { spawned, count = spawned.Count, replicationVerified = false };
+        finally
+        {
+            long totalMs = clock.ElapsedMilliseconds;
+            if (verbose || totalMs >= 100)
+                log("Spawn " + category + " quantity=" + quantity + " stage=" + stage + " total=" + totalMs + "ms catalog=" + catalogMs + "ms placement=" + placementMs + "ms native=" + (stage == "instantiate" ? totalMs - catalogMs - placementMs : 0) + "ms");
+        }
     }
     private static object Coordinates(Vector3 p) => new { x = p.x, y = p.y, z = p.z };
     public object ListEnemies()

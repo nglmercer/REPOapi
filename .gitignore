@@ -10,3 +10,7 @@ Directory.Repo.props
 # Client credentials are local configuration.
 .env
 .env.*
+
+# Python example and test caches.
+__pycache__/
+*.py[cod]

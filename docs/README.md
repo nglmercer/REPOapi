@@ -26,3 +26,5 @@ Start with **[Getting started](GETTING_STARTED.md)** to install the mod, load yo
 | PowerShell | `Invoke-RestMethod` | [Request helper](../examples/powershell/repo-api.ps1) |
 
 These programs are optional API consumers. The C# game plugin runs without any of these external runtimes.
+
+- [Code audit and fixes](AUDIT.md): security, reliability, performance changes and verification limits.

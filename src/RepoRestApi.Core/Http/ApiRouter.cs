@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -10,6 +11,17 @@ using RepoRestApi.Core.Models;
 namespace RepoRestApi.Core.Http;
 public sealed class ApiRouter
 {
+    private static readonly HashSet<string> WritePaths = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "/api/spawn/item", "/api/spawn/enemy", "/api/spawn/valuable", "/api/spawn/upgrade",
+        "/api/player/heal", "/api/player/revive", "/api/player/teleport", "/api/enemies/clear", "/api/enemies/despawn"
+    };
+    private static readonly Lazy<ApiResponse> OpenApi = new Lazy<ApiResponse>(() =>
+    {
+        using var stream = typeof(ApiRouter).Assembly.GetManifestResourceStream("openapi.json")!;
+        using var reader = new StreamReader(stream);
+        return ApiResponse.Raw(reader.ReadToEnd());
+    });
     private readonly ApiOptions options;
     private readonly IGameAdapter game;
     private readonly MainThreadDispatcher dispatcher;
@@ -28,23 +40,22 @@ public sealed class ApiRouter
             int split = target.IndexOf('?');
             string path = split < 0 ? target : target.Substring(0, split);
             string? search = null;
+            if (split >= 0 && CatalogCategory(path) == null) throw new ApiException(400, "INVALID_QUERY", "Filters are only supported on catalog endpoints.");
+            var queryKeys = new HashSet<string>(StringComparer.Ordinal);
             if (split >= 0)
                 foreach (string pair in target.Substring(split + 1).Split('&'))
                 {
                     var p = pair.Split(new[] { '=' }, 2);
+                    if (!queryKeys.Add(p[0])) throw new ApiException(400, "INVALID_QUERY", "Duplicate query filters are not supported.");
                     if (p[0] != "search" && p[0] != "category") throw new ApiException(400, "INVALID_QUERY", "Only search and category filters are supported.");
                     if (p[0] == "search") search = Uri.UnescapeDataString(p.Length > 1 ? p[1].Replace('+', ' ') : "");
                     if (p[0] == "category" && (p.Length < 2 || p[1] != path.Substring(path.LastIndexOf('/') + 1))) throw new ApiException(400, "INVALID_QUERY", "category must match the catalog endpoint.");
                 }
-            bool read = path == "/health" || path == "/api/version" || path == "/api/capabilities" || path == "/api/game/state" || path == "/openapi.json" || CatalogCategory(path) != null || path == "/api/players" || path.StartsWith("/api/players/", StringComparison.Ordinal) || path == "/api/enemies";
-            bool write = new[] { "/api/spawn/item", "/api/spawn/enemy", "/api/spawn/valuable", "/api/spawn/upgrade", "/api/player/heal", "/api/player/revive", "/api/player/teleport", "/api/enemies/clear", "/api/enemies/despawn" }.Contains(path);
+            bool read = path == "/health" || path == "/api/version" || path == "/api/capabilities" || path == "/api/game/state" || path == "/openapi.json" || CatalogCategory(path) != null || path == "/api/players" || (path.StartsWith("/api/players/", StringComparison.Ordinal) && path.Length > "/api/players/".Length && path.IndexOf('/', "/api/players/".Length) < 0) || path == "/api/enemies";
+            bool write = WritePaths.Contains(path);
             if (!read && !write) throw new ApiException(404, "NOT_FOUND", "Unknown endpoint.");
             if (method != (read ? "GET" : "POST")) throw new ApiException(405, "METHOD_NOT_ALLOWED", read ? "This endpoint requires GET." : "This endpoint requires POST.");
-            if (path == "/openapi.json")
-            {
-                using var stream = typeof(ApiRouter).Assembly.GetManifestResourceStream("openapi.json")!;
-                using var reader = new StreamReader(stream); return ApiResponse.Raw(reader.ReadToEnd());
-            }
+            if (path == "/openapi.json") return OpenApi.Value;
             if (read)
                 return await dispatcher.Execute(() => Read(path, search), options.RequestTimeoutMs).ConfigureAwait(false);
             if (contentType == null || !contentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase)) throw new ApiException(415, "UNSUPPORTED_MEDIA_TYPE", "POST requires application/json.");
@@ -117,13 +128,28 @@ public sealed class ApiRouter
         RequiredString(p, "mode");
         if (p["playerId"] != null) RequiredString(p, "playerId");
         foreach (string axis in new[] { "x", "y", "z" }) if (p[axis] != null && p[axis]!.Type != JTokenType.Float && p[axis]!.Type != JTokenType.Integer) throw new ApiException(400, "INVALID_POSITION", "Coordinates must be numbers.");
+        string? mode = p.Value<string>("mode");
+        string[] allowed = mode == "near_player" ? new[] { "mode", "playerId" } : mode == "world_position" ? new[] { "mode", "x", "y", "z" } : new[] { "mode" };
+        if (p.Properties().Any(v => !allowed.Contains(v.Name))) throw new ApiException(400, "INVALID_POSITION", "Position fields must match the selected mode.");
         try { p.ToObject<PositionRequest>()!.Validate(); } catch (JsonException) { throw new ApiException(400, "INVALID_POSITION", "Invalid position values."); }
+    }
+    // JObject discards comments between properties even with CommentHandling.Load.
+    // Reject them at the reader boundary so nested/property comments cannot slip through.
+    private sealed class RequestJsonReader : JsonTextReader
+    {
+        public RequestJsonReader(TextReader reader) : base(reader) { }
+        public override bool Read()
+        {
+            bool read = base.Read();
+            if (TokenType == JsonToken.Comment) throw new JsonReaderException("Comments are not allowed.");
+            return read;
+        }
     }
     private static JObject Parse(string body)
     {
         try
         {
-            using var sr = new StringReader(body); using var reader = new JsonTextReader(sr) { MaxDepth = 16, DateParseHandling = DateParseHandling.None };
+            using var sr = new StringReader(body); using var reader = new RequestJsonReader(sr) { MaxDepth = 16, DateParseHandling = DateParseHandling.None };
             var token = JToken.ReadFrom(reader, new JsonLoadSettings { DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error, CommentHandling = CommentHandling.Load });
             if (!(token is JObject result) || reader.Read() || result.DescendantsAndSelf().Any(t => t.Type == JTokenType.Comment)) throw new JsonReaderException();
             return result;

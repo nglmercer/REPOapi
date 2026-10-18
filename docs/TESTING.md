@@ -4,6 +4,10 @@
 
 Recorded 2026-10-17. This document distinguishes tested infrastructure from unverified gameplay. Desktop mocks do not establish Unity or multiplayer correctness.
 
+## Code audit update (2026-10-18)
+
+The [code audit](AUDIT.md) records the latest fixes and verification: 61 passing core/catalog cases, one passing Python client security regression, clean Release and installed-game-reference builds, and a NuGet transitive vulnerability check with no advisories reported. The gameplay observations below remain historical; this audit did not run gameplay actions.
+
 ## Automated checks completed
 
 - Release build of the solution: passed, zero warnings/errors.

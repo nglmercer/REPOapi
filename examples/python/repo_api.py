@@ -5,7 +5,13 @@ import os
 import sys
 import uuid
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class NoRedirect(HTTPRedirectHandler):
+    """Keep bearer credentials and commands on the configured API endpoint."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class ApiError(Exception):
@@ -23,6 +29,7 @@ class RepoApi:
             raise ValueError("Set REPO_API_TOKEN to AuthenticationToken from your BepInEx config.")
         self.base_url = (base_url or os.environ.get("REPO_API_URL", "http://127.0.0.1:17453")).rstrip("/")
         self.timeout = timeout
+        self.opener = build_opener(NoRedirect())
 
     def request(self, method, path, body=None, idempotency_key=None):
         if method not in ("GET", "POST") or not path.startswith("/") or path.startswith("//"):
@@ -36,7 +43,7 @@ class RepoApi:
             print(f"Idempotency-Key: {idempotency_key}", file=sys.stderr)
         request = Request(self.base_url + path, data=payload, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with self.opener.open(request, timeout=self.timeout) as response:
                 result = json.load(response)
                 if result.get("success") is False:
                     raise ApiError(response.status, result)

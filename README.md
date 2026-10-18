@@ -53,7 +53,7 @@ Run only the action you want. The examples use live catalog IDs and display the 
 
 **Current limits:** teleport and direct upgrade grants are unavailable. Upgrades spawn as physical pickups. Heal/revive report `invoked`, with no owner effect acknowledgement. Multi-object enemy setups are excluded. Check `/api/capabilities` before integrating actions.
 
-**Validation:** the plugin builds against both published game references and actual R.E.P.O. v0.4.4.3 assemblies. The existing core suite has 41 passing cases. Actual game probes confirmed startup, catalogs, authentication, shutdown and one item spawn reported by the host API. Physical usability, enemy behavior and second-client replication still need manual checks; [the testing record](docs/TESTING.md) states the evidence and limits.
+**Validation:** the plugin builds against both published game references and actual R.E.P.O. v0.4.4.3 assemblies. The core suite has 61 passing cases, plus a Python client redirect regression. See the [code audit](docs/AUDIT.md) for fixes and validation scope. Actual game probes confirmed startup, catalogs, authentication, shutdown and one item spawn reported by the host API. Physical usability, enemy behavior and second-client replication still need manual checks; [the testing record](docs/TESTING.md) states the evidence and limits.
 
 ## Build and package
 

@@ -20,7 +20,7 @@ internal static class ApiConfig
             MaxSpawnQuantity = config.Bind("Limits", "MaxSpawnQuantity", 10, "Maximum spawned entities per command, including enemy groups.").Value,
             MaxRequestBytes = config.Bind("Limits", "MaxRequestBytes", 16384, "Maximum UTF-8 JSON body bytes.").Value,
             QueueCapacity = config.Bind("Limits", "QueueCapacity", 64, "Maximum pending game commands and concurrent HTTP requests.").Value,
-            RequestTimeoutMs = config.Bind("Limits", "RequestTimeoutMs", 5000, "Queue deadline and upload timeout in milliseconds.").Value,
+            RequestTimeoutMs = config.Bind("Limits", "RequestTimeoutMs", 5000, "Queue deadline and separate upload/response timeouts in milliseconds.").Value,
             CommandsPerFrame = config.Bind("Limits", "CommandsPerFrame", 2, "Maximum commands processed by each Unity Update.").Value,
             Verbose = config.Bind("Diagnostics", "Verbose", false, "Log action execution durations.").Value
         };
